@@ -1,4 +1,5 @@
-import { $ui, Config } from 'easy-us';
+import { $ui, Config, h, $message } from 'easy-us';
+import { requestDeepSeek, parseDeepSeekConfigFile } from './deepseek-quiz';
 import { definition, restudy, volume } from './configs';
 
 /**
@@ -115,6 +116,85 @@ export const skipStudyTimeWarnDialog: Config = {
 	defaultValue: false
 };
 
+/** This key is stored by the userscript manager, excluded from desktop config synchronization. */
+export const deepseekConfigs: Record<string, Config> = {
+	deepseekEnabled: {
+		separator: 'DeepSeek 随堂练习（本地定制版）',
+		label: '启用 DeepSeek 自动选择并提交',
+		defaultValue: false,
+		sync: true,
+		attrs: {
+			type: 'checkbox',
+			title:
+				'用于 wisdom-mooc 的 AI 随堂练习。通用设置开启题库优先时，先查本地和已配置在线题库，未命中才将题干与选项发送到 DeepSeek 官方 API，产生 API 费用；答案仍可能有误。关闭后保留弹窗供手动作答，不再随机提交。'
+		},
+		extra: { appConfigSync: false }
+	},
+	deepseekApiKey: {
+		label: 'DeepSeek API Key',
+		defaultValue: '',
+		sync: true,
+		attrs: { type: 'password', autocomplete: 'off', placeholder: '在此填写你的官方 API Key' },
+		extra: { appConfigSync: false },
+		suffixSlot: function () {
+			const button = h('button', { className: 'base-style-button-secondary' }, '导入配置文件');
+			button.onclick = () => {
+				const picker = document.createElement('input');
+				picker.type = 'file';
+				picker.accept = '.json,application/json';
+				picker.onchange = async () => {
+					const file = picker.files?.[0];
+					if (!file) return;
+					try {
+						if (file.size > 16384) throw new Error('配置文件过大，请选择填写好的 deepseek.local.json。');
+						const config = parseDeepSeekConfigFile(await file.text());
+						this.cfg.deepseekEnabled = false;
+						this.cfg.deepseekApiKey = config.apiKey;
+						this.cfg.deepseekModel = config.model;
+						$message.success('配置已导入。请先测试连接，成功后再开启自动选择并提交。');
+					} catch (error) {
+						$message.error((error as Error).message);
+					}
+				};
+				picker.click();
+			};
+			return button;
+		}
+	},
+	deepseekModel: {
+		label: 'DeepSeek 模型',
+		defaultValue: 'deepseek-flash',
+		sync: true,
+		attrs: { placeholder: '填写账号可用的模型名称' },
+		extra: { appConfigSync: false },
+		suffixSlot: function () {
+			const button = h('button', { className: 'base-style-button-secondary' }, '测试连接');
+			button.onclick = async () => {
+				button.disabled = true;
+				button.textContent = '测试中…';
+				try {
+					const answers = await requestDeepSeek(
+						{ title: '1+1等于多少？', options: ['2', '3'], multiple: false },
+						{
+							enabled: true,
+							apiKey: String(this.cfg.deepseekApiKey || ''),
+							model: String(this.cfg.deepseekModel || '')
+						}
+					);
+					if (answers[0] !== 0) throw new Error('接口已返回，但测试题答案异常，请检查模型。');
+					$message.success('DeepSeek 连接成功。请确认已开启自动选择并提交。');
+				} catch (error) {
+					$message.error((error as Error).message);
+				} finally {
+					button.disabled = false;
+					button.textContent = '测试连接';
+				}
+			};
+			return button;
+		}
+	}
+};
+
 /**
  * 学习设置中心统一展示的完整配置。
  * 各 key 虽然也会在被隐藏的运行脚本中声明，但因同属 `zhs.study` 命名空间，存储值完全一致，
@@ -122,6 +202,7 @@ export const skipStudyTimeWarnDialog: Config = {
  */
 export const studyCenterConfigs: Record<string, Config> = {
 	notes: studyNotes,
+	...deepseekConfigs,
 	playbackRate,
 	volume,
 	definition,

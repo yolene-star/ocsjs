@@ -13,6 +13,7 @@ import { CommonEvents, CommonProject } from '../projects/common';
 import { $console, BackgroundProject } from '../projects/background';
 import { CommonWorkOptions } from '.';
 import { createIframeControlSession } from './iframe-control-bar';
+import { hasHybridAnswerSource, isHybridEnabled, searchHybridQuestion } from './hybrid-runtime';
 import {
 	buildAnswererEnv,
 	createAnswererWrappersSignature,
@@ -219,7 +220,7 @@ export function commonWork(options: {
 	if (iframeControl) {
 		// 子 iframe 操控模式：$message 经 cors 转发到顶层时无法执行交互回调（取消/倒计时结束），
 		// 不能使用交互式预检；但自动答题必须触发，简化为直接校验题库配置 + 延迟自动开始
-		if (workOptions.answererWrappers.length === 0) {
+		if (workOptions.answererWrappers.length === 0 && !hasHybridAnswerSource()) {
 			state.checkFailed = true;
 			answerWrapperEmptyWarning(0);
 		} else {
@@ -522,6 +523,17 @@ export function createCommonAnswerer(options: {
 			throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
 		}
 		const titleImages = titleResult.images;
+		if (isHybridEnabled() && ['single', 'multiple', 'judgement'].includes(ctx.type || '')) {
+			const choices = normalize(options.optionsTransform ? options.optionsTransform(elements, ctx) :
+				(ctx.elements.options || []).filter(Boolean).map((option) => option!.innerText || option!.textContent || '').join('\n'));
+			const optionTexts = (ctx.elements.options || []).filter(Boolean).map((option) => (option!.innerText || option!.textContent || '').replace(/\s+/g, ' ').trim());
+			const hasImages = !!titleImages?.length || !!choices.images?.length || QUESTION_IMAGE_REGEX.test(title) || QUESTION_IMAGE_REGEX.test(choices.text) ||
+				[...(ctx.elements.options || []), ...(ctx.elements.title || [])].some((option) => !!option?.querySelector('img,svg,canvas,math'));
+			if (!hasImages && optionTexts.length >= 2 && optionTexts.length <= 26 && optionTexts.length === (ctx.elements.options || []).filter(Boolean).length) {
+				await $.sleep((options.period ?? 3) * 1000);
+				return searchHybridQuestion({ title, options: optionTexts, multiple: ctx.type === 'multiple', kind: ctx.type }, options.answererWrappers);
+			}
+		}
 
 		return await BackgroundProject.scripts.data.methods.searchAnswerInCaches(title, async () => {
 			await $.sleep((options.period ?? 3) * 1000);
@@ -601,7 +613,7 @@ function workPreCheckMessage(
 ) {
 	const { onrun, onNoAnswererWrappers, onclose, ...opts } = options;
 
-	if (opts.answererWrappers.length === 0) {
+	if (opts.answererWrappers.length === 0 && !hasHybridAnswerSource()) {
 		onNoAnswererWrappers?.(opts);
 		return answerWrapperEmptyWarning(0);
 	} else {

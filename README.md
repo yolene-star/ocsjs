@@ -6,6 +6,8 @@
 
 # OCS 网课助手
 
+本 fork 包含 DeepSeek 回退与本地题库功能，配置、构建和测试见 [使用说明](docs/DEEPSEEK.md)。
+
 > OCS (Online Course Script) 网课刷课脚本，帮助大学生解决网课难题
 
 ![GitHub Repo stars](https://img.shields.io/github/stars/ocsjs/ocsjs)

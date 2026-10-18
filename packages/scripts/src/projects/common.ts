@@ -21,6 +21,7 @@ import {
 import { getAnswererConfigProvider, openAnswererConnect, waitForAnswererConfig } from '../utils/answerer-connect';
 import { confirmRiskyAnswerWrappers } from '../utils/answer-wrapper-security';
 import { initEdgeMinimize } from '../utils/edge-minimize';
+import { showHybridBank } from '../utils/hybrid-runtime';
 import {
 	createAnswererWrapperSection,
 	createSteps,
@@ -192,13 +193,24 @@ export const CommonProject = Project.create({
 				notes: {
 					defaultValue: $ui.notes([
 						'✨鼠标移动到按钮或者输入框，可以看到提示！',
-						'想要自动答题必须设置 “题库配置” ',
+						'可以设置“题库配置”；智慧树纯文字选择题也可启用下方题库优先/DeepSeek 增强。',
 						'设置后进入章节测试，作业，考试页面即可自动答题。'
 					]).outerHTML
 				},
 				answererWrappers: {
 					separator: '自动答题设置',
 					defaultValue: [] as AnswererWrapper[]
+				},
+				hybridEnabled: {
+					label: '题库优先，未命中使用 DeepSeek（智慧树）',
+					defaultValue: true,
+					sync: true,
+					attrs: { type: 'checkbox', title: '仅增强智慧树纯文字单选、多选和判断选择题。依次查询本地题库、此处已配置且启用的在线题库；未命中才调用自动学习中配置的 DeepSeek API，并更新本地题库。' },
+					suffixSlot() {
+						const button = h('button', { className: 'base-style-button-secondary' }, '管理本地题库');
+						button.onclick = showHybridBank;
+						return button;
+					}
 				},
 				/**
 				 * 禁用的题库

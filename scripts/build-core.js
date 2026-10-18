@@ -90,7 +90,7 @@ async function createUserJs() {
 				homepage: 'https://docs.ocsjs.com',
 				source: 'https://github.com/ocsjs/ocsjs',
 				icon: 'https://cdn.ocsjs.com/logo.png',
-				connect: ['enncy.cn', 'icodef.com', 'ocsjs.com', 'zaizhexue.top', 'localhost', '127.0.0.1',
+				connect: ['api.deepseek.com', 'enncy.cn', 'icodef.com', 'ocsjs.com', 'zaizhexue.top', 'localhost', '127.0.0.1',
 					// 智慧树阿里云资源，应用： 图片题资源访问
 					'aliyuncs.com'],
 				match: matchMetadata,

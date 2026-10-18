@@ -9,8 +9,11 @@ import {
 	studyCenterConfigs,
 	stopTime,
 	switchMode,
-	skipStudyTimeWarnDialog
+	skipStudyTimeWarnDialog,
+	deepseekConfigs
 } from '../utils/zhs.configs';
+import { DeepSeekQuizController, handleDeepSeekDialog, hideWisdomNotifications } from '../utils/deepseek-quiz';
+import { searchHybridQuizIndices, updateBankFromQuizFeedback, isHybridEnabled } from '../utils/hybrid-runtime';
 import {
 	migrateZhsStudyConfigs,
 	migrateZhsWorkConfigs,
@@ -428,6 +431,8 @@ class StudyPlusH5 extends StudyVideoH5 implements ZHSProcessor {
  * 2025-9月份新智慧学习页面，为智慧课程分类中的新课程
  */
 class WishdomH5 extends StudyVideoH5 implements ZHSProcessor {
+	private deepseekQuiz = new DeepSeekQuizController(searchHybridQuizIndices);
+
 	getCourseName() {
 		return $el('.course-name')?.textContent?.match(/课程名称：(.+)/)?.[1] || '无名称';
 	}
@@ -475,67 +480,34 @@ class WishdomH5 extends StudyVideoH5 implements ZHSProcessor {
 	}
 
 	hideDialog() {
-		/** 隐藏通知弹窗 */
-		$$el('.el-overlay,.el-dialog').forEach((dialog) => {
-			dialog.style.display = 'none';
-		});
+		// Keep exercises visible when API configuration or manual intervention is needed.
+		hideWisdomNotifications(document);
 	}
 
 	async handleTestDialog(remotePage?: RemotePage) {
 		const question_box = $el('.ai-class-exercise-dialog');
-		if (question_box) {
-			const options = $$el('.ques-list .item .option');
-			$message.info('正在关闭弹窗测验...');
-			if (options.length !== 0) {
+		try {
+			if (question_box) {
 				await waitForCaptcha();
-				// 最小化脚本窗口
-				BackgroundProject.scripts.render.methods.minimize();
-				BackgroundProject.scripts.render.methods.setPosition(100, 200);
-				// 随机选
-				const random = Math.floor(Math.random() * options.length);
-				await $.sleep(1000);
-				if (remotePage) {
-					await remotePage.click(options[random]);
-				} else {
-					options[random].click();
-				}
-
-				await $.sleep(1000);
+				await handleDeepSeekDialog(
+					question_box,
+					this.deepseekQuiz,
+					() => {
+						const cfg = ZHSProject.scripts['study-center'].cfg;
+						return { enabled: cfg.deepseekEnabled === true, apiKey: String(cfg.deepseekApiKey || ''), model: String(cfg.deepseekModel || ''), allowBankLookup: isHybridEnabled() };
+					},
+					async (element) => {
+						if (remotePage) await remotePage.click(element);
+						else element.click();
+					},
+					(message) => $message.info({ content: message, duration: 8 }),
+					(ms) => $.sleep(ms),
+					updateBankFromQuizFeedback
+				);
 			}
-			await $.sleep(1000);
-
-			const submit_btn = $el('.ai-class-exercise-dialog .el-dialog__footer .el-button.btn');
-			if (submit_btn) {
-				if (remotePage) {
-					await remotePage.hover('.ai-class-exercise-dialog .el-dialog__footer .el-button.btn');
-					await remotePage.click('.ai-class-exercise-dialog .el-dialog__footer .el-button.btn');
-				} else {
-					submit_btn.click();
-				}
-			}
-
-			const close_btn = $el('.ai-class-exercise-dialog .header-icon');
-			if (close_btn) {
-				if (remotePage) {
-					await remotePage.hover('.ai-class-exercise-dialog .header-icon');
-					await remotePage.click('.ai-class-exercise-dialog .header-icon');
-				} else {
-					close_btn.click();
-				}
-			}
-
-			// 如果无法关闭弹窗，后续版本只能强制删除
-			// await $.sleep(1000);
-			// document.querySelector('.components-box.has-compoent')?.remove();
-			// document.querySelector('.transparent-mask')?.remove();
-			$message.info('弹窗测验已关闭');
+		} finally {
+			setTimeout(() => { this.handleTestDialog(remotePage).catch(() => undefined); }, 3000);
 		}
-
-		/**
-		 * 每过三秒递归检测是否有弹窗
-		 */
-		await $.sleep(3000);
-		await this.handleTestDialog(remotePage);
 	}
 }
 
@@ -1636,6 +1608,7 @@ export const ZHSProject = Project.create({
 			matches: [['2025-12月新智慧学习页面', 'wisdom-mooc.zhihuishu.com/study/index']],
 			namespace: zhsStudyNamespace,
 			configs: {
+				...deepseekConfigs,
 				restudy: restudy,
 				skipStudyTimeWarnDialog,
 				reloadWhenError,
