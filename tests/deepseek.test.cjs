@@ -136,12 +136,160 @@ test('DOM adapter selects B, submits once, and closes only on platform feedback'
     actions.push(el.textContent);
     if (el.classList.contains('option')) el.classList.add('selected');
     if (el.textContent === '提交作答') { el.textContent = '已提交'; el.disabled = true; }
+    if (el.classList.contains('header-icon')) root.hidden = true;
   };
   const controller = new DeepSeekQuizController(async () => [1]);
   await handleDeepSeekDialog(root, controller, () => config, click, () => {}, async () => {});
   assert.deepEqual(actions, ['B 运动', '提交作答', '关闭']);
   await handleDeepSeekDialog(root, controller, () => config, click, () => {}, async () => {});
   assert.equal(actions.length, 3);
+});
+
+test('already submitted exercise closes and resumes only after the dialog disappears', async () => {
+  const { root } = dialog();
+  root.querySelector('.btn').textContent = '已提交';
+  root.querySelector('.btn').disabled = true;
+  const actions = [];
+  const controller = new DeepSeekQuizController(async () => { throw Error('must not query'); });
+  await handleDeepSeekDialog(root, controller, () => config, async el => {
+    actions.push(el.textContent);
+    if (el.classList.contains('header-icon')) root.hidden = true;
+  }, () => {}, async () => {}, undefined, async () => {
+    assert.equal(root.hidden, true);
+    actions.push('resume');
+  });
+  assert.deepEqual(actions, ['关闭', 'resume']);
+});
+
+test('late submission feedback is recovered on the next poll without resubmitting', async () => {
+  const { root } = dialog();
+  const actions = [];
+  const feedback = [];
+  const controller = new DeepSeekQuizController(async () => [1]);
+  const click = async el => {
+    actions.push(el.textContent);
+    if (el.classList.contains('option')) el.classList.add('selected');
+    if (el.classList.contains('header-icon')) root.remove();
+  };
+  const poll = () => handleDeepSeekDialog(root, controller, () => config, click, () => {}, async () => {}, () => feedback.push('saved'), async () => actions.push('resume'));
+  await poll();
+  assert.deepEqual(actions, ['B 运动', '提交作答']);
+  root.querySelector('.btn').textContent = '已提交';
+  root.querySelector('.btn').disabled = true;
+  await poll();
+  await poll();
+  assert.deepEqual(actions, ['B 运动', '提交作答', '关闭', 'resume']);
+  assert.deepEqual(feedback, ['saved']);
+});
+
+test('submission exceptions and failed closing preserve the dialog and never resume', async () => {
+  for (const failure of ['server-error', 'missing-close', 'close-no-effect']) {
+    const { root, dom } = dialog();
+    root.querySelector('.btn').textContent = '已提交';
+    if (failure === 'server-error') {
+      const alert = dom.window.document.createElement('div');
+      alert.className = 'el-alert--error';
+      alert.textContent = '提交异常';
+      root.append(alert);
+    }
+    if (failure === 'missing-close') root.querySelector('.header-icon').remove();
+    const messages = [];
+    let resumed = 0;
+    await handleDeepSeekDialog(root, new DeepSeekQuizController(async () => [1]), () => config,
+      async () => {}, text => messages.push(text), async () => {}, undefined, async () => resumed++);
+    assert.equal(root.isConnected, true);
+    assert.equal(root.hidden, false);
+    assert.equal(resumed, 0);
+    assert.ok(messages.length > 0, failure);
+  }
+});
+
+test('a manually interrupted submission stays open even when feedback arrives later', async () => {
+  const { root, dom } = dialog();
+  const actions = [];
+  const controller = new DeepSeekQuizController(async () => [1]);
+  const click = async el => {
+    actions.push(el.textContent);
+    if (el.classList.contains('option')) el.classList.add('selected');
+    if (el.textContent === '提交作答') root.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
+  await handleDeepSeekDialog(root, controller, () => config, click, () => {}, async () => {});
+  root.querySelector('.btn').textContent = '已提交';
+  await handleDeepSeekDialog(root, controller, () => config, click, () => {}, async () => {});
+  assert.deepEqual(actions, ['B 运动', '提交作答']);
+});
+
+test('normal submission closes before resuming, including when the answer was wrong', async () => {
+  const { root, dom } = dialog();
+  const actions = [];
+  await handleDeepSeekDialog(root, new DeepSeekQuizController(async () => [1]), () => config, async el => {
+    if (el.classList.contains('option')) el.classList.add('selected');
+    if (el.textContent === '提交作答') {
+      el.textContent = '已提交';
+      const correct = dom.window.document.createElement('p');
+      correct.textContent = '正确答案：C';
+      root.querySelector('.item').append(correct);
+    }
+    if (el.classList.contains('header-icon')) { actions.push('close'); root.hidden = true; }
+  }, () => {}, async () => {}, () => actions.push('feedback'), async () => actions.push('play'));
+  assert.deepEqual(actions, ['feedback', 'close', 'play']);
+});
+
+test('closing retries are bounded and never query or submit again', async () => {
+  const { root } = dialog();
+  root.querySelector('.btn').textContent = '已提交';
+  let clicks = 0;
+  let resumed = 0;
+  const controller = new DeepSeekQuizController(async () => { throw Error('unexpected query'); });
+  for (let i = 0; i < 6; i++) {
+    await handleDeepSeekDialog(root, controller, () => config, async () => clicks++, () => {}, async () => {}, undefined, async () => resumed++);
+  }
+  assert.equal(clicks, 3);
+  assert.equal(resumed, 0);
+});
+
+test('manual interaction during recovery prevents playback and later automatic closing', async () => {
+  const { root, dom } = dialog();
+  root.querySelector('.btn').textContent = '已提交';
+  let clicks = 0;
+  let resumed = 0;
+  const controller = new DeepSeekQuizController(async () => [1]);
+  const poll = () => handleDeepSeekDialog(root, controller, () => config, async () => {
+    clicks++;
+    root.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  }, () => {}, async () => {}, undefined, async () => resumed++);
+  await poll();
+  await poll();
+  assert.equal(clicks, 1);
+  assert.equal(resumed, 0);
+});
+
+test('closing may destroy the dialog contents before resuming the lesson', async () => {
+  const { root } = dialog();
+  root.querySelector('.btn').textContent = '已提交';
+  let resumed = 0;
+  await handleDeepSeekDialog(root, new DeepSeekQuizController(async () => [1]), () => config, async () => {
+    root.hidden = true;
+    root.innerHTML = '';
+  }, () => {}, async () => {}, undefined, async () => resumed++);
+  assert.equal(resumed, 1);
+});
+
+test('manual input between polls prevents late feedback from closing the exercise', async () => {
+  const { root, dom } = dialog();
+  const actions = [];
+  const controller = new DeepSeekQuizController(async () => [1]);
+  const click = async el => {
+    actions.push(el.textContent);
+    if (el.classList.contains('option')) el.classList.add('selected');
+  };
+  const poll = () => handleDeepSeekDialog(root, controller, () => config, click, () => {}, async () => {}, undefined, async () => actions.push('play'));
+  await poll();
+  await poll();
+  root.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  root.querySelector('.btn').textContent = '已提交';
+  await poll();
+  assert.deepEqual(actions, ['B 运动', '提交作答']);
 });
 
 test('manual input or question replacement during the request cancels every automated click', async () => {

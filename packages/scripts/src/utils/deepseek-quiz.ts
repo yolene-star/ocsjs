@@ -210,6 +210,28 @@ export function readDeepSeekQuestion(root: HTMLElement): QuizQuestion {
 }
 
 const unsupportedDialogs = new WeakSet<HTMLElement>();
+const dialogProgress = new WeakMap<
+	HTMLElement,
+	{
+		signature: string;
+		item: Element | null;
+		interrupted: boolean;
+		finishing: boolean;
+		finished: boolean;
+		closeAttempts: number;
+		feedbackSaved: boolean;
+		unwatch?: () => void;
+	}
+>();
+
+function isDialogVisible(root: HTMLElement): boolean {
+	if (!root.isConnected) return false;
+	for (let element: HTMLElement | null = root; element; element = element.parentElement) {
+		const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+		if (element.hidden || style?.display === 'none' || style?.visibility === 'hidden') return false;
+	}
+	return true;
+}
 const selectedSelector =
 	'.selected,.active,.checked,.is-checked,.is-selected,.is-active,[aria-checked="true"],[data-selected="true"],input:checked';
 
@@ -236,10 +258,15 @@ export async function handleDeepSeekDialog(
 	click: (element: HTMLElement) => Promise<void>,
 	notify: (message: string) => void,
 	sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-	onFeedback?: (question: QuizQuestion, root: HTMLElement) => void
+	onFeedback?: (question: QuizQuestion, root: HTMLElement) => void,
+	onResume?: () => Promise<void>
 ): Promise<void> {
+	if (!isDialogVisible(root)) {
+		dialogProgress.get(root)?.unwatch?.();
+		return;
+	}
 	const submit = root.querySelector<HTMLButtonElement>('.el-dialog__footer .el-button.btn');
-	if (!submit || submit.disabled || /已提交/.test(submit.textContent || '')) return;
+	if (!submit) return;
 	let question: QuizQuestion;
 	try {
 		question = readDeepSeekQuestion(root);
@@ -251,111 +278,219 @@ export async function handleDeepSeekDialog(
 		return;
 	}
 	const item = root.querySelector('.ques-list .item');
-	const options = Array.from(root.querySelectorAll<HTMLElement>('.ques-list .item .option'));
-	// Never overwrite an answer already selected by the user.
-	if (options.some(isOptionSelected)) return;
-	const config = getConfig();
-	const revision = JSON.stringify(config);
 	const signature = JSON.stringify(question);
-	let interacted = false;
-	let expectedTarget: HTMLElement | undefined;
-	let expectedEvents = new Set<string>();
-	const intendedSelection = new Set<number>();
-	let submitted = false;
-	const onInteraction = (event: Event) => {
-		if (
-			event.type === 'keydown' ||
-			event.type === 'input' ||
-			!expectedTarget ||
-			!event.target ||
-			!expectedTarget.contains(event.target as Node) ||
-			expectedEvents.has(event.type)
-		) {
-			interacted = true;
-		} else {
-			expectedEvents.add(event.type);
-		}
+	dialogProgress.get(root)?.unwatch?.();
+	let progress = dialogProgress.get(root);
+	if (!progress || progress.signature !== signature || progress.item !== item) {
+		progress = {
+			signature,
+			item,
+			interrupted: false,
+			finishing: false,
+			finished: false,
+			closeAttempts: 0,
+			feedbackSaved: false
+		};
+		dialogProgress.set(root, progress);
+	}
+	const state = progress;
+	// Preserve manual intervention during the idle interval between polling calls.
+	const watchBetweenPolls = () => {
+		state.unwatch?.();
+		if (state.finished || state.interrupted || !isDialogVisible(root)) return;
+		const events = ['click', 'pointerdown', 'input', 'keydown'];
+		const onManual = () => {
+			state.interrupted = true;
+			state.unwatch?.();
+		};
+		events.forEach((event) => root.addEventListener(event, onManual, true));
+		state.unwatch = () => {
+			events.forEach((event) => root.removeEventListener(event, onManual, true));
+			state.unwatch = undefined;
+		};
 	};
-	const clickExpected = async (element: HTMLElement) => {
-		expectedTarget = element;
-		expectedEvents = new Set<string>();
-		try {
-			await click(element);
-		} finally {
-			expectedTarget = undefined;
-		}
-	};
-	const events = ['pointerdown', 'click', 'keydown', 'input'];
-	events.forEach((event) => root.addEventListener(event, onInteraction, true));
 	try {
-		await controller.run(question, config, {
-			stillCurrent: () => {
+		const config = getConfig();
+		const revision = JSON.stringify(config);
+		const hasFeedback = () =>
+			/已提交/.test(submit.textContent || '') || /正确答案\s*[:：]/.test(root.textContent || '');
+		const hasException = () =>
+			Array.from(root.querySelectorAll<HTMLElement>('.el-alert--error,.submit-error,[data-submit-error]')).some(
+				(element) => isDialogVisible(element) && !!element.textContent?.trim()
+			);
+		const finish = async (closeClick: (element: HTMLElement) => Promise<void>) => {
+			if (!config.enabled || state.interrupted || state.finishing || state.finished || !hasFeedback()) return;
+			if (hasException()) {
+				notify('检测到提交异常，已保留练习弹窗，请手动检查。');
+				return;
+			}
+			if (state.closeAttempts >= 3) return;
+			state.finishing = true;
+			let closingTarget: HTMLElement | undefined;
+			const closingEvents = new Set<string>();
+			const onFinishInteraction = (event: Event) => {
 				if (
-					!root.isConnected ||
-					interacted ||
+					(event.type !== 'click' && event.type !== 'pointerdown') ||
+					!closingTarget ||
+					!closingTarget.contains(event.target as Node) ||
+					closingEvents.has(event.type)
+				)
+					state.interrupted = true;
+				else closingEvents.add(event.type);
+			};
+			const finishEvents = ['click', 'pointerdown', 'input', 'keydown'];
+			finishEvents.forEach((event) => root.addEventListener(event, onFinishInteraction, true));
+			try {
+				if (!state.feedbackSaved) {
+					onFeedback?.(question, root);
+					state.feedbackSaved = true;
+				}
+				const close = root.querySelector<HTMLElement>('.header-icon,.el-dialog__headerbtn');
+				if (!close) {
+					state.closeAttempts = 3;
+					notify('答题已提交，但找不到关闭按钮，已保留弹窗，请手动检查。');
+					return;
+				}
+				state.closeAttempts++;
+				closingTarget = close;
+				await closeClick(close);
+				closingTarget = undefined;
+				for (let i = 0; i < 8 && isDialogVisible(root); i++) await sleep(250);
+				const remainingItem = root.querySelector('.ques-list .item');
+				if (
+					state.interrupted ||
 					JSON.stringify(getConfig()) !== revision ||
-					root.querySelector('.ques-list .item') !== item
+					hasException() ||
+					(remainingItem && (remainingItem !== item || JSON.stringify(readDeepSeekQuestion(root)) !== signature))
 				)
-					return false;
-				if (submitted) return true;
-				try {
-					return (
-						JSON.stringify(readDeepSeekQuestion(root)) === signature &&
-						!submit.disabled &&
-						!/已提交/.test(submit.textContent || '')
-					);
-				} catch {
-					return false;
+					return;
+				if (isDialogVisible(root)) {
+					notify('答题已提交，但弹窗未关闭；将有限重试，仍失败时请手动检查。');
+					return;
 				}
-			},
-			select: async (index) => {
-				intendedSelection.add(index);
-				await clickExpected(options[index]);
-			},
-			submit: async () => {
-				// Vue may update checked classes after the remote click resolves.
-				await sleep(150);
-				if (interacted || JSON.stringify(getConfig()) !== revision || !root.isConnected) return false;
-				if (
-					root.querySelector('.ques-list .item') !== item ||
-					JSON.stringify(readDeepSeekQuestion(root)) !== signature ||
-					submit.disabled ||
-					/已提交/.test(submit.textContent || '')
-				)
-					return false;
-				const selected = options
-					.map((option, index) => (isOptionSelected(option) ? index : -1))
-					.filter((index) => index >= 0);
-				if (selected.length !== intendedSelection.size || selected.some((index) => !intendedSelection.has(index))) {
-					notify('无法确认页面已选中 DeepSeek 返回的选项，已保留弹窗，请手动检查。');
-					return false;
-				}
-				await clickExpected(submit);
-				for (let i = 0; i < 12; i++) {
-					await sleep(250);
+				state.finished = true;
+				await onResume?.();
+			} catch {
+				notify('答题后的关闭或恢复播放出现异常，请手动检查。');
+			} finally {
+				finishEvents.forEach((event) => root.removeEventListener(event, onFinishInteraction, true));
+				state.finishing = false;
+			}
+		};
+		// Feedback may arrive after the initial submit wait, or the page may reopen a submitted exercise.
+		if (hasFeedback()) {
+			await finish(click);
+			return;
+		}
+		if (state.interrupted || hasException() || submit.disabled) return;
+		const options = Array.from(root.querySelectorAll<HTMLElement>('.ques-list .item .option'));
+		// Never overwrite an answer already selected by the user.
+		if (options.some(isOptionSelected)) return;
+		let interacted = false;
+		let expectedTarget: HTMLElement | undefined;
+		let expectedEvents = new Set<string>();
+		const intendedSelection = new Set<number>();
+		let submitted = false;
+		const onInteraction = (event: Event) => {
+			if (
+				event.type === 'keydown' ||
+				event.type === 'input' ||
+				!expectedTarget ||
+				!event.target ||
+				!expectedTarget.contains(event.target as Node) ||
+				expectedEvents.has(event.type)
+			) {
+				interacted = true;
+				state.interrupted = true;
+			} else {
+				expectedEvents.add(event.type);
+			}
+		};
+		const clickExpected = async (element: HTMLElement) => {
+			expectedTarget = element;
+			expectedEvents = new Set<string>();
+			try {
+				await click(element);
+			} finally {
+				expectedTarget = undefined;
+			}
+		};
+		const events = ['pointerdown', 'click', 'keydown', 'input'];
+		events.forEach((event) => root.addEventListener(event, onInteraction, true));
+		try {
+			await controller.run(question, config, {
+				stillCurrent: () => {
 					if (
 						!root.isConnected ||
 						interacted ||
 						JSON.stringify(getConfig()) !== revision ||
-						root.querySelector('.ques-list .item') !== item ||
-						JSON.stringify(readDeepSeekQuestion(root)) !== signature
+						root.querySelector('.ques-list .item') !== item
 					)
 						return false;
-					if (/已提交/.test(submit.textContent || '') || /正确答案\s*[:：]/.test(root.textContent || '')) {
-						submitted = true;
-						onFeedback?.(question, root);
-						return true;
+					if (submitted) return true;
+					try {
+						return (
+							JSON.stringify(readDeepSeekQuestion(root)) === signature &&
+							!submit.disabled &&
+							!/已提交/.test(submit.textContent || '')
+						);
+					} catch {
+						return false;
 					}
-				}
-				return false;
-			},
-			close: async () => {
-				const close = root.querySelector<HTMLElement>('.header-icon');
-				if (close) await clickExpected(close);
-			},
-			notify
-		});
+				},
+				select: async (index) => {
+					intendedSelection.add(index);
+					await clickExpected(options[index]);
+				},
+				submit: async () => {
+					// Vue may update checked classes after the remote click resolves.
+					await sleep(150);
+					if (interacted || JSON.stringify(getConfig()) !== revision || !root.isConnected) return false;
+					if (
+						root.querySelector('.ques-list .item') !== item ||
+						JSON.stringify(readDeepSeekQuestion(root)) !== signature ||
+						submit.disabled ||
+						/已提交/.test(submit.textContent || '')
+					)
+						return false;
+					const selected = options
+						.map((option, index) => (isOptionSelected(option) ? index : -1))
+						.filter((index) => index >= 0);
+					if (selected.length !== intendedSelection.size || selected.some((index) => !intendedSelection.has(index))) {
+						notify('无法确认页面已选中 DeepSeek 返回的选项，已保留弹窗，请手动检查。');
+						return false;
+					}
+					await clickExpected(submit);
+					for (let i = 0; i < 12; i++) {
+						await sleep(250);
+						if (
+							!root.isConnected ||
+							interacted ||
+							JSON.stringify(getConfig()) !== revision ||
+							root.querySelector('.ques-list .item') !== item ||
+							JSON.stringify(readDeepSeekQuestion(root)) !== signature
+						)
+							return false;
+						if (hasException()) {
+							notify('检测到提交异常，已保留练习弹窗，请手动检查。');
+							return false;
+						}
+						if (hasFeedback()) {
+							submitted = true;
+							return true;
+						}
+					}
+					return false;
+				},
+				close: async () => {
+					await finish(clickExpected);
+				},
+				notify
+			});
+		} finally {
+			events.forEach((event) => root.removeEventListener(event, onInteraction, true));
+		}
 	} finally {
-		events.forEach((event) => root.removeEventListener(event, onInteraction, true));
+		watchBetweenPolls();
 	}
 }

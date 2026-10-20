@@ -502,7 +502,13 @@ class WishdomH5 extends StudyVideoH5 implements ZHSProcessor {
 					},
 					(message) => $message.info({ content: message, duration: 8 }),
 					(ms) => $.sleep(ms),
-					updateBankFromQuizFeedback
+					updateBankFromQuizFeedback,
+					async () => {
+						if (state.study.stop) return;
+						if (getPopupCaptcha()) throw new Error('需要先完成验证码');
+						const media = state.study.currentMedia;
+						if (media?.isConnected && !media.ended && media.paused) await media.play();
+					}
 				);
 			}
 		} finally {
